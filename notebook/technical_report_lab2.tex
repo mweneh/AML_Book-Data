@@ -1,0 +1,271 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[a4paper, top=1.6cm, bottom=1.6cm, left=2cm, right=2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{parskip}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+
+% --- Header / Footer ---
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small DSA 8401 Applied Machine Learning}
+\lhead{\small Lab 2 Technical Report}
+\cfoot{\small\thepage}
+
+% --- Section Spacing ---
+\titlespacing*{\section}{0pt}{5pt}{2pt}
+\titlespacing*{\subsection}{0pt}{4pt}{1pt}
+
+% --- Column type for wrapped text with fixed width ---
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\begin{document}
+
+% ---- Title Block ----
+\begin{center}
+  {\large\bfseries Credit Risk Model Evaluation: Data Quality and Leakage Assessment}\\[4pt]
+  {\small
+    \textbf{To:} Head of Credit Risk \quad
+    \textbf{From:} David Mauti\\
+    \textbf{Date:} August 17, 2026 \quad
+    \textbf{Re:} Mobile Money Fraud Model
+  }
+\end{center}
+
+\vspace{4pt}\hrule\vspace{8pt}
+
+% =============================================================
+\section{Data Quality Audit}
+% =============================================================
+
+We ran a full diagnostic pass over the raw mobile money transaction data before any
+modelling work began, covering missingness rates, duplicate detection, data type
+validation, and correlation screening. Ten columns showed the most significant problems.
+
+\vspace{2pt}
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}P{1.8cm} P{2.3cm} P{3.0cm} P{1.2cm} P{4.5cm}@{}}
+\toprule
+\textbf{Column} & \textbf{Issue} & \textbf{Evidence} & \textbf{Class} & \textbf{Remediation and Why} \\
+\midrule
+
+\texttt{txn\_id} &
+Exact duplicate rows from retry events or log merge failures. &
+\texttt{df.duplicated()} found 3,600 exact duplicate rows out of 183,600 (2.0\%). Duplicated \texttt{txn\_id} count matched exactly. &
+N/A &
+Drop duplicates before any split. A duplicate row landing in both train and validation inflates performance estimates by letting the model score rows it has already memorised. \\
+
+\texttt{amount} &
+Free-text string, not a number. Three incompatible debit encodings coexist. &
+\texttt{dtype} is \texttt{object}. Sample values: \texttt{"1,329/- Dr"}, \texttt{"(1,307/-)"}, \texttt{"-2,136/-"}. A direct cast to \texttt{float} yields 100\% NaN. &
+N/A &
+Apply a regex parser stripping commas, the \texttt{/-} suffix, and brackets, inferring sign from context. Zero parse failures were observed after applying this rule. \\
+
+\texttt{txn\_time} &
+Three incompatible datetime formats coexist in one column. &
+Sample: ISO \texttt{2026-06-30 14:24}, UK \texttt{07/04/2026 11:21}, long-form \texttt{Jan 29, 2026 01:17 PM}. A single-format parse fails on two thirds of rows. &
+N/A &
+\texttt{pd.to\_datetime} with \texttt{errors="coerce"} across three sequential formats. Recovers all timestamps with zero residual NaT values. \\
+
+\texttt{reg\_id} &
+Same customer appears under multiple variants from case and whitespace differences in the KYC field. &
+Raw \texttt{reg\_id} has 11,722 distinct values. After \texttt{.strip().upper()} this collapses to 3,991 unique customers, a 66\% reduction. &
+N/A &
+Canonicalise to uppercase, whitespace stripped, before any grouping or split. Ensures one customer maps to exactly one group. \\
+
+\texttt{agent\_id} &
+Missingness concentrated in three regions rather than spread randomly. &
+Missing 13.69\% overall. Arusha 45.2\%, Jinja 45.1\%, Mwanza 44.8\%; all other regions 0.0\%. Fraud rate equal between missing and present rows (8.39\% vs 8.41\%). &
+MAR &
+Missingness fully explained by observed \texttt{region} column (a legacy logger issue). A dedicated ``Unknown'' category is sufficient; the pattern is predictable from existing model inputs. \\
+
+\texttt{device\_id} &
+Uniform dropout with no detectable driver across any observed column. &
+Missing 5.91\%, flat across all 10 regions (5.6--6.1\%). Fraud rate: 8.38\% missing vs 8.40\% present. &
+MCAR &
+Treat missing as ``Unknown'' category. More complex imputation adds no value and risks introducing artificial structure. \\
+
+\texttt{gps\_lat} &
+High missingness that no observed column can explain, suggesting dropout depends on the unrecorded location itself. &
+Missing 36.21\% (66,464 rows). Rate uniform across all 10 regions (35.4--36.7\%), so \texttt{region} does not explain it. Remote/indoor transactions fail GPS capture. &
+MNAR &
+Create a binary \texttt{gps\_missing} flag. The absence of a GPS ping may carry predictive signal; imputing coordinates would fabricate geographic data. \\
+
+\texttt{gps\_lon} &
+Identical dropout pattern to \texttt{gps\_lat}. &
+Missing 36.21\%, NaN on exactly the same rows as \texttt{gps\_lat}. &
+MNAR &
+Handled by the same \texttt{gps\_missing} flag as \texttt{gps\_lat}. \\
+
+\texttt{manual\_review\_score} &
+Post-event analyst score stored alongside raw transaction features. &
+Pearson $|r| = 0.981$ with \texttt{is\_fraud}. A pre-event predictor on an 8\% fraud rate cannot achieve this; the score is assigned only after the transaction is flagged. &
+N/A &
+Drop entirely before any feature engineering. Does not exist at real-time scoring time. See Section 3. \\
+
+\texttt{settlement\_status} &
+Categorical outcome written after the transaction lifecycle completes. &
+Fraud rate by status: \texttt{reversed} = 100.0\%, \texttt{held} = 65.1\%, \texttt{pending} = 0.0\%, \texttt{settled} = 0.4\%. Settlement resolves hours to days after the fact. &
+N/A &
+Drop entirely. No settlement outcome is observable when a transaction is submitted for scoring. See Section 3. \\
+
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% =============================================================
+\section{Feature Dictionary}
+% =============================================================
+
+We engineered 15 features spanning five families. All customer-level aggregates are
+computed strictly over transactions timestamped before \texttt{SCORING\_TS = 2026-08-01},
+ensuring no future information bleeds into feature values.
+
+\vspace{2pt}
+\begin{center}
+\tiny
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}P{1.6cm} P{2.4cm} P{1.7cm} P{1.8cm} P{2.4cm} P{2.3cm}@{}}
+\toprule
+\textbf{Feature} & \textbf{Definition} & \textbf{Window} & \textbf{Upstream Fields} & \textbf{Write Time} & \textbf{Fairness Note} \\
+\midrule
+
+\texttt{amount\_abs} & Absolute value of the transaction amount. & Single txn & \texttt{amount} & Ledger write at transaction initiation. & -- \\
+
+\texttt{log\_amt} & \texttt{log1p(amount\_abs)}. Compresses the high-value right tail. & Single txn & \texttt{amount} & Same as above. & -- \\
+
+\texttt{hr\_sin} & Sine encoding of transaction hour (0-23), preserving the cyclic midnight relationship. & Single txn & \texttt{txn\_time} & Timestamp recorded at transaction initiation. & -- \\
+
+\texttt{hr\_cos} & Cosine encoding of transaction hour; paired with \texttt{hr\_sin}. & Single txn & \texttt{txn\_time} & Same as above. & -- \\
+
+\texttt{dow\_sin} & Sine encoding of day of week (0=Mon, 6=Sun). & Single txn & \texttt{txn\_time} & Same as above. & -- \\
+
+\texttt{dow\_cos} & Cosine encoding of day of week; paired with \texttt{dow\_sin}. & Single txn & \texttt{txn\_time} & Same as above. & -- \\
+
+\texttt{payday\_dist} & Days to nearest payday (1st or 28th). Captures salary-cycle patterns. & Single txn & \texttt{txn\_time} & Same as above. & -- \\
+
+\texttt{gps\_missing} & Binary flag: 1 if GPS coordinates are null. & Single txn & \texttt{gps\_lat}, \texttt{gps\_lon} & Set at transaction time when GPS fix fails. & Rural customers may show higher rates due to infrastructure gaps; monitor for geographic disparate impact. \\
+
+\texttt{recency\_days} & Days since the customer's last transaction before \texttt{SCORING\_TS}. & All history $<$ \texttt{SCORING\_TS} & \texttt{txn\_time}, \texttt{customer\_id} & \texttt{txn\_time} at initiation; \texttt{customer\_id} from KYC \texttt{reg\_id} at account opening. & -- \\
+
+\texttt{frequency} & Total transaction count before \texttt{SCORING\_TS}. & All history $<$ \texttt{SCORING\_TS} & \texttt{txn\_time}, \texttt{customer\_id} & Same as above. & -- \\
+
+\texttt{monetary\_out} & Total outgoing (debit) value before \texttt{SCORING\_TS}. & All history $<$ \texttt{SCORING\_TS} & \texttt{amount}, \texttt{customer\_id} & \texttt{amount} written to ledger at initiation. & -- \\
+
+\texttt{monetary\_in} & Total incoming (credit) value before \texttt{SCORING\_TS}. & All history $<$ \texttt{SCORING\_TS} & \texttt{amount}, \texttt{customer\_id} & Same as above. & -- \\
+
+\texttt{n\_counterparty} & Count of distinct counterparties. High values may indicate smurfing. & All history $<$ \texttt{SCORING\_TS} & \texttt{counterparty}, \texttt{customer\_id} & \texttt{counterparty} recorded at transaction creation. & -- \\
+
+\texttt{cashout\_ratio} & Fraction of transactions that are cash withdrawals. & All history $<$ \texttt{SCORING\_TS} & \texttt{txn\_type}, \texttt{customer\_id} & \texttt{txn\_type} set at transaction creation. & -- \\
+
+\texttt{out\_in\_ratio} & \texttt{monetary\_out / (monetary\_in + 1)}. Flags accounts draining faster than they receive. & All history $<$ \texttt{SCORING\_TS} & \texttt{amount}, \texttt{customer\_id} & Same as \texttt{monetary\_out}. & -- \\
+
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% =============================================================
+\section{Leakage Assessment Memo}
+% =============================================================
+
+Two columns in the raw dataset carry information that does not exist at the time a
+real-time fraud decision must be made. Left in the training set, they produce offline
+metrics that dramatically overstate how well the model will actually perform.
+
+\textbf{Background: the six causes of data leakage (Section 2.7.2).} The course
+material identifies six mechanisms by which future or outcome-related information
+contaminates model training: (1) including the target variable directly as a feature;
+(2) fitting preprocessing steps on the full dataset before splitting; (3) including
+post-event fields written only after the outcome is known; (4) allowing duplicate
+records to straddle the train and validation split; (5) failing to group related records
+(e.g., same customer) on the same side of the split; and (6) using proxy variables that
+encode the label without naming it directly. Both leaks identified below fall under
+causes 3 and 6.
+
+\subsection*{Leak 1: \texttt{manual\_review\_score}}
+
+\textbf{Where it occurs.} This numeric column is stored directly in the transaction ledger
+alongside raw event data, making it easy to accidentally include in a feature matrix.
+
+\textbf{How the leakage happens.} The score is generated by a fraud analyst who reviews a
+transaction only after it has already been flagged as suspicious. It encodes the analyst's
+conclusion about whether fraud occurred (Cause 3: post-event field) and functions as a
+near-perfect proxy for the target label (Cause 6: proxy variable). Both causes apply simultaneously.
+
+\textbf{Impact.} Including this column produces a cross-validated ROC-AUC of
+\textbf{1.0000}. Removing it brings the score down to \textbf{0.6252}, a reduction of
+\textbf{0.3748 AUC points}. Any model selected on the inflated metric would have been
+chosen entirely on the basis of this one column.
+
+\textbf{Governance recommendation.} The fraud review score should be stored in a separate
+operational table with a strict write timestamp, never joined to the raw transaction ledger
+used for model development. All feature store queries must enforce a point-in-time cutoff
+and explicitly exclude tables written after the scoring timestamp.
+
+\subsection*{Leak 2: \texttt{settlement\_status}}
+
+\textbf{Where it occurs.} This categorical field sits in the same transaction table as the
+raw input features and describes the final resolution of the payment.
+
+\textbf{How the leakage happens.} Settlement is a downstream business process that
+resolves hours or days after the transaction is submitted. The value ``reversed'' is only
+written once a fraud dispute has concluded (Cause 3: post-event field). Because reversed
+transactions correspond to confirmed fraud at a rate of 100\%, the field is also a
+near-perfect class separator (Cause 6: proxy variable). At real-time scoring, the field
+would show only ``pending'' for every new transaction, providing no information.
+
+\textbf{Impact.} Even after removing \texttt{manual\_review\_score}, retaining
+\texttt{settlement\_status} sustains a near-perfect AUC because the ``reversed'' category
+creates a 100\% fraud-rate split on its own. The combined inflation from both columns
+together is \textbf{0.3748 AUC points} (from 0.6252 to 1.0000). The joint effect confirms
+that both columns must be excluded simultaneously.
+
+\textbf{Governance recommendation.} Settlement status should be treated as an outcome
+field, not an input field. It should reside in a separate post-settlement table that is
+excluded from all feature pipelines by default. Access to outcome tables should require a
+documented exception reviewed by the model risk team.
+
+% =============================================================
+\section{Reproducible Machine Learning Pipeline}
+% =============================================================
+
+The pipeline is implemented as a single scikit-learn \texttt{Pipeline} object. All
+feature engineering, imputation, scaling, and encoding steps run inside the pipeline,
+which means they are re-fitted from scratch on each training fold during cross-validation.
+This eliminates preprocessing leakage by construction.
+
+\textbf{Architecture.} A custom \texttt{FeatureEngineer} transformer handles amount
+parsing, datetime extraction, cyclical encoding, missingness flagging, and customer-level
+RFM aggregation. It is followed by a \texttt{ColumnTransformer} that applies
+\texttt{SimpleImputer} and \texttt{RobustScaler} to numeric features and
+\texttt{SimpleImputer} plus \texttt{OneHotEncoder} to categorical features. A logistic
+regression classifier sits at the end of the chain.
+
+\textbf{Cross-validation.} \texttt{GroupKFold} with 5 splits groups records by the
+canonicalised \texttt{customer\_id}. This ensures no customer's transactions appear on
+both sides of a fold boundary, preventing Leakage Cause 5.
+
+\textbf{Result.} The honest, leakage-free cross-validated ROC-AUC is
+\textbf{0.6037 ($\pm$0.0073)}. For comparison, the contaminated model (both leaky columns
+included) scored 1.0000, confirming the 0.3748 inflation documented in Section 3.
+
+\textbf{Serialisation.} The trained pipeline is saved to \texttt{pipeline.joblib} using
+\texttt{joblib.dump}. It can be reloaded with \texttt{joblib.load("pipeline.joblib")} and
+applied to a new raw transaction table without any preprocessing steps outside the object.
+
+\end{document}
