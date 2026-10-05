@@ -1,0 +1,4 @@
+cd lab10_fastapi
+pip install -r requirements.txt
+python train_model.py              # creates model/fraud_model.joblib
+uvicorn api.main:app --reload      # starts the server
