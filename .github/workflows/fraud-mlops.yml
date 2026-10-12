@@ -1,0 +1,84 @@
+# CI: train + quality gate (MLflow) -> test the API -> build the Docker image and check it runs
+# CD: only on master, and only if CI passed -> push the Docker image to GitHub Container Registry
+name: fraud-mlops
+
+on:
+  push:
+    branches: [master]
+    paths: ["fraud_mlops/**", "Data/CleanedFeaturesFromLoan.csv", ".github/workflows/fraud-mlops.yml"]
+  pull_request:
+    paths: ["fraud_mlops/**", "Data/CleanedFeaturesFromLoan.csv", ".github/workflows/fraud-mlops.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: fraud_mlops
+
+env:
+  IMAGE: ghcr.io/nuelbundi/fraud-api
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Train models + quality gate (MLflow)
+        run: python train.py
+
+      - name: Test the API
+        run: pytest -q
+
+      - name: Build the Docker image
+        run: docker build -t fraud-api .
+
+      - name: Smoke test the container
+        run: |
+          docker run -d -p 8000:8000 --name api fraud-api
+          for i in $(seq 1 30); do curl -s http://localhost:8000/health && break; sleep 1; done
+          curl --fail http://localhost:8000/health
+          curl --fail http://localhost:8000/model-info
+
+      - name: Save the model and MLflow results
+        uses: actions/upload-artifact@v4
+        with:
+          name: fraud-model
+          path: |
+            fraud_mlops/model/
+            fraud_mlops/mlflow.db
+            fraud_mlops/mlruns/
+
+  cd:
+    needs: ci
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # allows pushing to ghcr.io with the built-in GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get the model trained in CI
+        uses: actions/download-artifact@v4
+        with:
+          name: fraud-model
+          path: fraud_mlops
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the image
+        run: |
+          docker build -t $IMAGE:latest -t $IMAGE:${{ github.sha }} .
+          docker push $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}

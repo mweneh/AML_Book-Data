@@ -1,0 +1,5 @@
+# Everything: training (MLflow) + API + tests. Used by CI.
+-r requirements-api.txt
+mlflow
+pytest
+httpx

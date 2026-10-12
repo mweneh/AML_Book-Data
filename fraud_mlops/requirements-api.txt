@@ -1,0 +1,7 @@
+# Only what the API needs. Used by the Docker image (keeps it small).
+# scikit-learn is pinned so the model trained in CI loads in the container.
+fastapi
+uvicorn
+pandas
+joblib
+scikit-learn==1.5.2

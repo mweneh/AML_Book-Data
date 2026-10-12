@@ -6,7 +6,7 @@ import streamlit as st
 st.set_page_config(page_title="Fraud Detection", page_icon="💰",)
 
 # Where the FastAPI server lives (override with the API_URL environment variable)
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8001/predict")
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/predict")
 
 st.title("Fraud Detection")
 st.write("Enter a transaction and the model will predict whether it is fraud.")

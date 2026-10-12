@@ -1,0 +1,56 @@
+# Lab 11 - retrain the lab10 fraud model on every change and only ship it if it passes
+# the cost and fairness gates (lab11_mlflow_cicd/gates.py) and the API smoke test.
+name: lab11-model-gates
+
+# Only triggers on lab11_mlflow_cicd/ for now: that folder (requirements.txt, gates.py,
+# test_api.py) isn't in the repo yet. Once it is, add back "lab10_fastapi/**",
+# "Data/CleanedFeaturesFromLoan.csv" and this workflow file to both path lists.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "lab11_mlflow_cicd/**"
+  pull_request:
+    paths:
+      - "lab11_mlflow_cicd/**"
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: lab11_mlflow_cicd/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r lab11_mlflow_cicd/requirements.txt
+
+      - name: Keep the committed model as the champion
+        run: cp lab10_fastapi/model/fraud_model.joblib champion.joblib
+
+      - name: Train the challenger with lab10's training script
+        run: python lab10_fastapi/train_model.py   # overwrites lab10_fastapi/model/fraud_model.joblib
+
+      - name: Cost + fairness gates (logs to MLflow, sets registry aliases)
+        run: >
+          python lab11_mlflow_cicd/gates.py
+          --champion champion.joblib
+          --challenger lab10_fastapi/model/fraud_model.joblib
+
+      - name: API smoke test with the challenger loaded
+        run: pytest -q lab11_mlflow_cicd/test_api.py
+
+      - name: Upload MLflow store and challenger model
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-run-${{ github.sha }}
+          path: |
+            lab11_mlflow_cicd/mlflow.db
+            mlruns/
+            lab10_fastapi/model/fraud_model.joblib

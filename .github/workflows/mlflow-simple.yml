@@ -1,0 +1,63 @@
+# CI: on every push / pull request -> train all models, check the quality gate, run tests
+# CD: only on master, and only if CI passed -> "deploy" the production model
+name: mlflow-simple
+
+on:
+  push:
+    branches: [master]
+    paths: ["mlflow_simple/**", ".github/workflows/mlflow-simple.yml"]
+  pull_request:
+    paths: ["mlflow_simple/**", ".github/workflows/mlflow-simple.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: mlflow_simple
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Train models + quality gate
+        run: python train.py
+
+      - name: Test the production model
+        run: pytest -q test_model.py
+
+      - name: Save MLflow results
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-results
+          path: |
+            mlflow_simple/mlflow.db
+            mlflow_simple/mlruns/
+
+  cd:
+    needs: ci
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Get MLflow results from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: mlflow-results
+          path: mlflow_simple
+
+      - name: Deploy (load the production model and predict)
+        run: python predict.py
